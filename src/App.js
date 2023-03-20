@@ -1,32 +1,26 @@
 import './App.css';
-import { useEffect, useState } from 'react';
-import { Excalidraw, exportToCanvas } from "@excalidraw/excalidraw";
+import { useState } from 'react';
+import { Excalidraw, exportToBlob } from "@excalidraw/excalidraw";
 import { Modal } from './Modal';
 import { View } from './View';
-import { formatEther } from 'ethers';
+import { utils } from 'ethers';
 import { ConnectWallet } from './ConnectWallet';
 import { UserContext } from './context'
+import { providers } from 'ethers'
+import { WebBundlr } from '@bundlr-network/client';
 
 function App() {
-  const [wallet, setWallet] = useState();
   const [tags, setTags] = useState([]);
   const [excalidrawAPI, setExcalidrawAPI] = useState(null);
+  const [wallet, setWallet] = useState(null);
   const [img, setImg] = useState(null);
   const [isOpen, setIsOpen] = useState(false);
-  const [view, setView] = useState(false)
+  const [view, setView] = useState(false);
 
-  useEffect(() => {
-    getStoredWallet()
-  }, [])
+  const getTxCost = async (bundlrInstance, bytes) => {
+    const cost = await bundlrInstance?.getPrice(bytes);
 
-  const getStoredWallet = async () => {
-    const storedWallet = await window.ethereum.request({ method: 'eth_accounts' })
-    debugger
-  }
-  const getTxCost = async (bytes) => {
-    const cost = await wallet?.getPrice(bytes);
-
-    return formatEther(cost.toString().slice(0, 5))
+    return utils.formatEther(cost.toString().slice(0, 5))
   }
 
   const handleExport = async () => {
@@ -34,56 +28,89 @@ function App() {
     if (!elements || !elements.length) {
       return
     }
-    const canvas = await exportToCanvas({
+
+    const blob = await exportToBlob({
       elements,
       files: excalidrawAPI.getFiles(),
       quality: 1,
     });
 
-    setImg(canvas.toDataURL());
+    const reader = new FileReader();
+    reader.onload = () => {
+      setImg(reader.result);
+    };
+    reader.onerror = (error) => {
+      console.error(error);
+    };
+
+    reader.readAsDataURL(blob);
+
     setIsOpen(true);
   }
 
-  const upload = async () => {
-    const buffer = Buffer.from(img.split(',')[1], 'base64');
-    setTags([...tags, { name: "Content-Type", value: "image/png" }, { name: "Uploader-Address", value: wallet.address }]);
-    console.log(tags)
-    const tagsString = JSON.stringify(tags);
-    const bufferString = JSON.stringify(buffer);
-    const bytes = new TextEncoder().encode(tagsString + bufferString).length;
-    let confirmed
-    if (bytes / 1024 >= 100) {
-      const cost = await getTxCost(bytes);
+  const connectBundlr = async () => {
+    const provider = new providers.Web3Provider(window.ethereum);
+    await provider._ready();
 
-      confirmed = window.confirm(`Are you sure you want to upload? \n It will cost ${cost} ${wallet.currency}`);
-    } else {
-      confirmed = window.confirm(`Are you sure you want to upload?`);
-    }
+    const bundlr = new WebBundlr("https://node2.bundlr.network", "matic", provider);
+    await bundlr.ready();
 
-    // try {
-    //   if (!confirmed) {
-    //     return;
-    //   }
-    const tx = await wallet.upload(buffer,
-      {
-        tags: tags,
-      }
-    );
-    console.log(tx)
-    // } catch (err) {
-    //   console.log(err)
-    // }
+    return bundlr
   }
 
-  const viewUploads = async () => {
-    debugger
+  const upload = async () => {
+    try {
+      const bundlrInstance = await connectBundlr();
+      const buffer = Buffer.from(img.split(',')[1], 'base64');
+
+      setTags([...tags,
+      { name: 'App-Name', value: 'Excarlidraw-v1' },
+      { name: "Content-Type", value: "image/png" },
+      { name: "Uploader-Address", value: bundlrInstance.address }]);
+
+      const bufferBytes = buffer.length;
+      const objectsString = JSON.stringify(tags);
+      const objectsBytes = new TextEncoder().encode(objectsString).length;
+      const totalBytes = bufferBytes + objectsBytes;
+
+      const balance = await bundlrInstance.getLoadedBalance();
+      let confirmed
+      if (totalBytes / 1024 >= 100) {
+        const cost = await getTxCost(bundlrInstance, totalBytes);
+        confirmed = window.confirm(`Are you sure you want to upload? \n Your balance is ${bundlrInstance.utils.unitConverter(balance)}\n It will cost ${cost > 0.0001 ? cost : `~ 0.0005`} ${bundlrInstance.currency}`);
+      } else {
+        confirmed = window.confirm(`Are you sure you want to upload?`);
+      }
+      if (confirmed) {
+        try {
+          const tx = await bundlrInstance.upload(buffer,
+            {
+              tags: tags,
+            }
+          );
+          console.log(tx)
+          return tx
+        } catch (err) {
+          console.log(err)
+        }
+      }
+      setTags([])
+    } catch (err) {
+      console.log(err)
+    }
+  }
+
+
+  const handleClear = () => {
+    setTags([])
+    excalidrawAPI.resetScene()
   }
 
   return (
     <UserContext.Provider
       value={{
-        bundlrInstance: wallet,
-        setBundlrInstance: setWallet,
+        wallet: wallet,
+        setWallet: setWallet,
         isOpen: isOpen,
         setIsOpen: setIsOpen,
         img: img,
@@ -93,7 +120,7 @@ function App() {
       }}
     >
       <div className="App">
-        <ConnectWallet />
+        <ConnectWallet connectBundlr={connectBundlr} />
         <div className="pt-10">
           <span className="flex justify-center gap-4">
             <button id="open"
@@ -101,16 +128,16 @@ function App() {
               onClick={handleExport}>Preview</button>
             <button id="open"
               className="px-5 py-2 bg-gray-500 hover:bg-gray-700 text-white cursor-pointer rounded-md"
-              onClick={() => excalidrawAPI.resetScene()}>Clear</button>
+              onClick={handleClear}>Clear</button>
             {wallet && <button id="open"
               className="px-5 py-2 bg-gray-500 hover:bg-gray-700 text-white cursor-pointer rounded-md"
-              onClick={() => setView(true)}>View Uploads</button>
+              onClick={() => setView(!view)}>View Uploads</button>
             }
           </span>
           <div style={{ height: "750px" }} className='custom-styles'>
             <Excalidraw ref={(api) => setExcalidrawAPI(api)} />
           </div>
-          {view && <View />}
+          {view && <View wallet={wallet} setView={setView} />}
           {img && <Modal />}
         </div>
       </div>
